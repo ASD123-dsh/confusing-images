@@ -1,0 +1,4 @@
+# -*- coding: utf-8 -*-
+# 开发和 Windows 单文件打包依赖。
+-r requirements.txt
+PyInstaller>=6.16,<7

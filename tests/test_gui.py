@@ -81,6 +81,40 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(str(self.app.process_button["state"]), "disabled")
         self.assertEqual(str(self.app.save_button["state"]), "disabled")
 
+    def test_file_selection_keyboard_and_busy_lock(self) -> None:
+        """空格可切换当前行；忙碌时逐行切换和全选都不能修改待处理集合。"""
+        self.app.load_directory(Path(self.directory.name))
+        self.wait_idle()
+        panel = self.app.file_list
+        first = panel.tree.get_children()[0]
+        panel.tree.focus(first)
+        panel._on_space(None)
+        self.assertEqual(panel.checked_files(), [Path("输入图片.png")])
+        self.app._busy = True
+        self.app._set_controls()
+        try:
+            panel._on_space(None)
+            panel._toggle_item(first)
+            panel.select_all_var.set(False)
+            panel._toggle_all()
+            self.assertEqual(panel.checked_files(), [Path("输入图片.png")])
+            self.assertEqual(str(panel.select_all_check["state"]), "disabled")
+        finally:
+            self.app._busy = False
+            self.app._set_controls()
+        panel._on_space(None)
+        self.assertEqual(panel.checked_files(), [])
+
+    def test_selected_long_path_is_available_without_truncating_data(self) -> None:
+        """长文件名的完整相对路径可在只读框查看、移动光标和复制。"""
+        panel = self.app.file_list
+        relative = Path("很长的目录名" * 12) / ("长文件名" * 20 + ".png")
+        panel.populate([relative])
+        panel.tree.selection_set("file-0")
+        panel._show_path()
+        self.assertEqual(panel.path_hint.get(), str(relative))
+        self.assertEqual(str(panel.path_hint["state"]), "readonly")
+
     def test_empty_password_creates_public_image(self) -> None:
         """不填口令可以直接处理，生成可无口令还原的图片。"""
         self.load_fixture()
@@ -126,6 +160,113 @@ class GuiTests(unittest.TestCase):
         self.app.process_image()
         self.wait_idle()
         self.assertEqual(core.load_image(self.input_path).tobytes(), self.app.result_image.tobytes())
+        self.error.assert_not_called()
+
+    def load_layered_fixture(self) -> Image.Image:
+        """载入三层相同算法的真实 PNG，返回原图供连续点击回归比较。"""
+        original = core.load_image(self.input_path)
+        layered = original
+        for index in range(3):
+            layered = core.scramble_image(layered, algorithm="tomato")
+        core.save_png(layered, self.input_path)
+        self.load_fixture()
+        return original
+
+    def test_repeated_restore_clicks_advance_and_stop_at_original(self) -> None:
+        """连续点击每次还原一层，到原图后禁用按钮并阻止快捷键再次处理。"""
+        original = self.load_layered_fixture()
+        loaded = self.app.input_image
+        for index in range(3):
+            self.app.process_image()
+            self.wait_idle()
+            if index < 2:
+                self.assertIn(core.METADATA_KEY, self.app.result_image.info)
+            else:
+                self.assertNotIn(core.METADATA_KEY, self.app.result_image.info)
+        self.assertEqual(self.app.result_image.tobytes(), original.tobytes())
+        self.assertIs(self.app.input_image, loaded)
+        self.assertEqual(str(self.app.process_button["state"]), "disabled")
+        final = self.app.result_image
+        self.app.process_image()
+        self.assertFalse(self.app._busy)
+        self.assertIs(self.app.result_image, final)
+        self.error.assert_not_called()
+
+    def test_chain_updates_algorithm_password_and_preserves_retry_result(self) -> None:
+        """混合算法和口令逐层切换，错误口令保留中间结果，可保存并重试。"""
+        original = core.load_image(self.input_path)
+        inner = core.scramble_image(original, "inner key", algorithm="block")
+        middle = core.scramble_image(inner, algorithm="per-pixel")
+        outer = core.scramble_image(middle, "outer key", algorithm="tomato")
+        core.save_png(outer, self.input_path)
+        original_file = self.input_path.read_bytes()
+        self.load_fixture()
+        self.app.password.set("outer key")
+        self.app.process_image()
+        self.wait_idle()
+        self.assertEqual(self.app._algorithm_id(), "per-pixel")
+        self.assertEqual(str(self.app.password_entry["state"]), "disabled")
+        self.app.process_image()
+        self.wait_idle()
+        self.assertEqual(self.app.result_image.tobytes(), inner.tobytes())
+        self.assertEqual(self.app._algorithm_id(), "block")
+        self.assertEqual(str(self.app.password_entry["state"]), "normal")
+        previous = self.app.result_image
+        self.app.password.set("wrong key")
+        self.assertIs(self.app.result_image, previous)
+        self.app.process_image()
+        self.wait_idle()
+        self.error.assert_called_once()
+        self.assertIs(self.app.result_image, previous)
+        output = Path(self.directory.name) / "中间层.png"
+        with mock.patch("confusing_images.gui.filedialog.asksaveasfilename", return_value=str(output)):
+            self.app.save_result()
+        self.wait_idle()
+        self.assertEqual(core.load_image(output).info[core.METADATA_KEY], inner.info[core.METADATA_KEY])
+        self.app.password.set("inner key")
+        self.app.process_image()
+        self.wait_idle()
+        self.assertEqual(self.app.result_image.tobytes(), original.tobytes())
+        self.assertEqual(self.input_path.read_bytes(), original_file)
+
+    def test_chain_cursor_resets_when_mode_or_file_changes(self) -> None:
+        """切换模式或重新选图后从左侧输入重新开始，避免沿用旧图的还原进度。"""
+        self.load_layered_fixture()
+        self.app.process_image()
+        self.wait_idle()
+        first = self.app.result_image.info[core.METADATA_KEY]
+        self.app.mode.set("scramble")
+        self.app._mode_changed()
+        self.app.mode.set("restore")
+        self.app._mode_changed()
+        self.app.process_image()
+        self.wait_idle()
+        self.assertEqual(self.app.result_image.info[core.METADATA_KEY], first)
+        self.load_fixture()
+        self.app.process_image()
+        self.wait_idle()
+        self.assertEqual(self.app.result_image.info[core.METADATA_KEY], first)
+        self.error.assert_not_called()
+
+    def test_chain_manual_mode_uses_loaded_input_and_resets_progress(self) -> None:
+        """手动模式仍针对左侧输入，切回自动后重新从载入图片还原。"""
+        self.load_layered_fixture()
+        self.app.process_image()
+        self.wait_idle()
+        first = self.app.result_image.info[core.METADATA_KEY]
+        self.app.compatibility.set(True)
+        self.app._format_changed()
+        self.app.password.set("0.618")
+        expected = core.restore_selected_image(self.app.input_image, "0.618", manual=True)
+        self.app.process_image()
+        self.wait_idle()
+        self.assertEqual(self.app.result_image.tobytes(), expected.tobytes())
+        self.assertEqual(self.app.result_image.info[core.RESTORE_STATUS], "unverified")
+        self.app.compatibility.set(False)
+        self.app._format_changed()
+        self.app.process_image()
+        self.wait_idle()
+        self.assertEqual(self.app.result_image.info[core.METADATA_KEY], first)
         self.error.assert_not_called()
 
     def test_overwriting_input_is_blocked(self) -> None:
@@ -265,6 +406,10 @@ class GuiTests(unittest.TestCase):
         self.assertTrue((result.output_directory / "输入图片.png").is_file())
         self.assertEqual(str(self.app.save_button["state"]), "disabled")
         self.assertEqual(str(self.app.batch_details_button["state"]), "normal")
+        self.assertIs(self.app.result_preview._summary, result)
+        self.app.mode.set("restore")
+        self.app._mode_changed()
+        self.assertIsNone(self.app.result_preview._summary)
         self.info.assert_called_once()
         self.error.assert_not_called()
 
@@ -348,25 +493,28 @@ class GuiTests(unittest.TestCase):
         self.assertFalse(self.app._busy)
         self.assertFalse(self.app.batch_plan.output_directory.exists())
 
-    def test_batch_stop_preserves_current_saved_image(self) -> None:
-        """点击停止后仅完成当前图片，控件恢复，统计进度不误报百分之百。"""
+    def test_batch_stop_counts_all_running_images(self) -> None:
+        """点击停止后收集两张已运行图片，未提交的第三张不处理，统计与磁盘一致。"""
         Image.new("RGB", (25, 17), "red").save(Path(self.directory.name) / "second.png")
+        Image.new("RGB", (25, 17), "blue").save(Path(self.directory.name) / "third.png")
         self.app.load_directory(Path(self.directory.name))
         self.wait_idle()
         self.select_all_files()
         self.app.password.set("key")
         started = threading.Event()
+        both_running = threading.Barrier(2)
         release = threading.Event()
         real_scramble = core.scramble_image
 
         def delayed_scramble(*args: object, **kwargs: object) -> Image.Image:
-            """在当前图片处理入口暂停，以确定性验证停止按钮。"""
+            """两张均进入处理后再允许停止，避免线程调度使断言偶然通过。"""
+            both_running.wait(timeout=5)
             started.set()
             if not release.wait(timeout=5):
                 raise RuntimeError("测试同步超时")
             return real_scramble(*args, **kwargs)
 
-        with mock.patch("confusing_images.batch.scramble_image", side_effect=delayed_scramble):
+        with mock.patch("confusing_images.batch.scramble_image", side_effect=delayed_scramble), mock.patch("confusing_images.batch.os.cpu_count", return_value=2):
             with mock.patch("confusing_images.gui.messagebox.askokcancel", return_value=True):
                 self.app.process_image()
             try:
@@ -377,8 +525,11 @@ class GuiTests(unittest.TestCase):
             self.wait_idle()
         result = self.app.batch_result
         self.assertTrue(result.cancelled)
-        self.assertEqual(result.succeeded, 1)
-        self.assertEqual(self.app.progress.get(), 50)
+        self.assertIs(self.app.result_preview._summary, result)
+        self.assertEqual((result.succeeded, result.failed, result.completed), (2, 0, 2))
+        saved = {path.relative_to(result.output_directory) for path in result.output_directory.rglob("*.png")}
+        self.assertEqual(saved, {target for source, target in result.outputs})
+        self.assertAlmostEqual(self.app.progress.get(), 100 * 2 / 3)
         self.assertEqual(str(self.app.stop_button["state"]), "disabled")
         self.assertEqual(str(self.app.folder_button["state"]), "normal")
 

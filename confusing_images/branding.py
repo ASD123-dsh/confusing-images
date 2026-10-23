@@ -7,13 +7,13 @@ from PIL import Image, ImageDraw
 
 
 def create_icon() -> Image.Image:
-    """绘制蓝色圆角底和错落图块，缩小时保持图形清晰。"""
+    """绘制青绿圆角底和错落图块，与桌面工作台配色保持一致。"""
     image = Image.new("RGBA", (256, 256), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
-    draw.rounded_rectangle((8, 8, 248, 248), radius=54, fill="#2563EB")
+    draw.rounded_rectangle((8, 8, 248, 248), radius=54, fill="#138579")
     draw.rounded_rectangle((54, 53, 119, 118), radius=8, fill="#FFFFFF")
-    draw.rounded_rectangle((137, 45, 202, 110), radius=8, fill="#BFD5FF")
-    draw.rounded_rectangle((44, 137, 109, 202), radius=8, fill="#BFD5FF")
+    draw.rounded_rectangle((137, 45, 202, 110), radius=8, fill="#BDE5D9")
+    draw.rounded_rectangle((44, 137, 109, 202), radius=8, fill="#BDE5D9")
     draw.rounded_rectangle((127, 128, 192, 193), radius=8, fill="#F8CC73")
     return image
 

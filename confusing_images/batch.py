@@ -262,14 +262,15 @@ def run_batch(
         # 先按线程数提交首批任务，取消时不再提交后续文件。
         initial = min(thread_count, len(pending))
         for index in range(initial):
+            if cancel_event is not None and cancel_event.is_set():
+                result.cancelled = True
+                break
             relative = pending.pop(0)
             futures[executor.submit(_process_one, root, output, relative, password, algorithm, strength, inverse, compatible)] = relative
         while futures:
             if cancel_event is not None and cancel_event.is_set():
                 result.cancelled = True
-                for future in futures:
-                    future.cancel()
-                break
+                # 修复停止后漏记的问题：已提交任务仍会保存或失败，必须继续收集全部结果。
             for future in as_completed(tuple(futures)):
                 futures.pop(future, None)
                 status, relative, saved_path, unverified, note = future.result()

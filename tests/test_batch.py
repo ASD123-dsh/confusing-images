@@ -188,6 +188,45 @@ class BatchTests(unittest.TestCase):
         self.assertEqual(result.outputs[0][1], Path("a_2.png"))
         self.assertEqual((result.output_directory / "a.png").read_bytes(), b"created by another process")
 
+    def test_cancel_collects_running_success_failure_and_unverified_results(self) -> None:
+        """停止时等待两个已运行任务，并核对保存文件、失败及未校验统计没有遗漏。"""
+        for inverse, broken in ((False, False), (True, False), (False, True)):
+            with self.subTest(inverse=inverse, broken=broken):
+                prefix = f"case-{inverse}-{broken}"
+                first = self.write_image(prefix + "/a.png")
+                second = self.write_image(prefix + "/b.png")
+                self.write_image(prefix + "/c.png")
+                if broken:
+                    second.write_bytes(b"broken image")
+                plan = batch.collect_images(first.parent)
+                event = threading.Event()
+                started = threading.Barrier(2)
+                real_process = batch._process_one
+
+                def process(*args: object) -> tuple:
+                    """确保两张均已运行；第二张等停止请求后才完成，稳定复现漏记。"""
+                    started.wait(timeout=5)
+                    if args[2].name == "b.png" and not event.wait(timeout=5):
+                        raise RuntimeError("未收到停止请求")
+                    return real_process(*args)
+
+                def report(value: float, text: str) -> None:
+                    """第一张统计完成后立即停止，第三张不得提交。"""
+                    event.set()
+
+                with mock.patch("confusing_images.batch._process_one", side_effect=process):
+                    result = batch.run_batch(plan, inverse=inverse, workers=2, cancel_event=event, progress=report)
+                saved = {path.relative_to(result.output_directory) for path in result.output_directory.rglob("*.png")}
+                self.assertTrue(result.cancelled)
+                self.assertEqual(result.completed, 2)
+                self.assertEqual(result.succeeded, 1 if broken else 2)
+                self.assertEqual(result.failed, int(broken))
+                self.assertEqual(result.unverified, 2 if inverse else 0)
+                self.assertEqual(len(result.unverified_notes), result.unverified)
+                self.assertEqual(saved, {target for source, target in result.outputs})
+                self.assertNotIn(Path("c.png"), saved)
+                self.assertFalse(list(result.output_directory.rglob(".confusing-images-*")))
+
     def test_forbidden_overwrite_is_atomic_and_cleans_temp(self) -> None:
         """底层禁止覆盖保存不得损坏已有文件，并清理本次临时 PNG。"""
         image = Image.new("RGB", (5, 5), "red")
